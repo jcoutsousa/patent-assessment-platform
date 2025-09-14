@@ -1,0 +1,273 @@
+name: Code Quality & Formatting
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # Frontend code quality
+  frontend-quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: ./frontend/package-lock.json
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Check formatting with Prettier
+      run: npm run format:check
+
+    - name: Run ESLint
+      run: npm run lint
+
+    - name: Run TypeScript compiler
+      run: npm run type-check
+
+    - name: Check for unused dependencies
+      run: npx depcheck --ignores="@types/*,eslint*,prettier"
+
+    - name: Bundle analyzer (if main branch)
+      if: github.ref == 'refs/heads/main'
+      run: |
+        npm run build
+        npm run analyze
+
+  # Backend code quality
+  backend-quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Configure Poetry
+      run: |
+        poetry config virtualenvs.create true
+        poetry config virtualenvs.in-project true
+
+    - name: Cache Poetry dependencies
+      uses: actions/cache@v3
+      with:
+        path: ./.venv
+        key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+
+    - name: Install dependencies
+      run: poetry install
+
+    - name: Check formatting with Black
+      run: poetry run black --check .
+
+    - name: Check import sorting with isort
+      run: poetry run isort --check-only .
+
+    - name: Run Flake8 linting
+      run: poetry run flake8 .
+
+    - name: Run MyPy type checking
+      run: poetry run mypy .
+
+    - name: Check for security issues with Bandit
+      run: poetry run bandit -r . -x tests/
+
+    - name: Check for unused dependencies
+      run: poetry check
+
+  # Documentation quality
+  docs-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install documentation tools
+      run: |
+        pip install markdownlint-cli
+        pip install doc8
+        pip install proselint
+
+    - name: Lint Markdown files
+      run: |
+        markdownlint README.md docs/*.md || true
+
+    - name: Check documentation style
+      run: |
+        find . -name "*.md" -not -path "./node_modules/*" -not -path "./.git/*" | xargs proselint || true
+
+    - name: Validate links in documentation
+      uses: gaurav-nelson/github-action-markdown-link-check@v1
+      with:
+        use-quiet-mode: 'yes'
+        use-verbose-mode: 'yes'
+        config-file: '.github/markdown-link-check-config.json'
+
+  # Auto-fix minor issues
+  auto-fix:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    # Frontend auto-fixes
+    - name: Install frontend dependencies
+      working-directory: ./frontend
+      run: npm ci
+
+    - name: Auto-fix ESLint issues
+      working-directory: ./frontend
+      run: npm run lint:fix || true
+
+    - name: Auto-format with Prettier
+      working-directory: ./frontend
+      run: npm run format || true
+
+    # Backend auto-fixes
+    - name: Install backend dependencies
+      working-directory: ./backend
+      run: poetry install
+
+    - name: Auto-format with Black
+      working-directory: ./backend
+      run: poetry run black . || true
+
+    - name: Auto-fix import sorting with isort
+      working-directory: ./backend
+      run: poetry run isort . || true
+
+    # Commit auto-fixes
+    - name: Commit auto-fixes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add -A
+        git diff --staged --quiet || git commit -m "Auto-fix: Code formatting and linting [skip ci]"
+        git push || true
+
+  # Report code metrics
+  code-metrics:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install code analysis tools
+      run: |
+        npm install -g cloc
+        pip install radon
+
+    - name: Generate code statistics
+      run: |
+        echo "# Code Metrics Report" > code-metrics.md
+        echo "" >> code-metrics.md
+        echo "## Lines of Code" >> code-metrics.md
+        echo "\`\`\`" >> code-metrics.md
+        cloc --exclude-dir=node_modules,.next,dist,build --md . >> code-metrics.md
+        echo "\`\`\`" >> code-metrics.md
+        echo "" >> code-metrics.md
+        echo "## Python Complexity (Backend)" >> code-metrics.md
+        echo "\`\`\`" >> code-metrics.md
+        radon cc backend/ -a >> code-metrics.md
+        echo "\`\`\`" >> code-metrics.md
+
+    - name: Upload metrics report
+      uses: actions/upload-artifact@v4
+      with:
+        name: code-metrics
+        path: code-metrics.md
+
+    - name: Comment metrics on commit
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const metrics = fs.readFileSync('code-metrics.md', 'utf8');
+
+          // Create or update gist with metrics
+          const gists = await github.rest.gists.listForUser({
+            username: context.repo.owner
+          });
+
+          const existingGist = gists.data.find(gist =>
+            gist.description === 'Code Metrics - Patent Assessment Platform'
+          );
+
+          if (existingGist) {
+            await github.rest.gists.update({
+              gist_id: existingGist.id,
+              files: {
+                'code-metrics.md': {
+                  content: metrics
+                }
+              }
+            });
+          } else {
+            await github.rest.gists.create({
+              description: 'Code Metrics - Patent Assessment Platform',
+              public: true,
+              files: {
+                'code-metrics.md': {
+                  content: metrics
+                }
+              }
+            });
+          }

@@ -1,0 +1,104 @@
+version: 2
+updates:
+  # Frontend dependencies (npm)
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "joanacsousa"
+    commit-message:
+      prefix: "frontend"
+      include: "scope"
+    groups:
+      development-dependencies:
+        dependency-type: "development"
+        patterns:
+          - "@types/*"
+          - "eslint*"
+          - "prettier*"
+          - "@typescript-eslint/*"
+          - "jest*"
+          - "@testing-library/*"
+      react-dependencies:
+        patterns:
+          - "react*"
+          - "next*"
+          - "@next/*"
+      ui-dependencies:
+        patterns:
+          - "tailwindcss*"
+          - "@tailwindcss/*"
+          - "@heroicons/*"
+          - "headlessui*"
+
+  # Backend dependencies (pip)
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "joanacsousa"
+    commit-message:
+      prefix: "backend"
+      include: "scope"
+    groups:
+      fastapi-dependencies:
+        patterns:
+          - "fastapi*"
+          - "uvicorn*"
+          - "pydantic*"
+          - "starlette*"
+      database-dependencies:
+        patterns:
+          - "sqlalchemy*"
+          - "alembic*"
+          - "psycopg*"
+          - "redis*"
+      ml-dependencies:
+        patterns:
+          - "openai*"
+          - "numpy*"
+          - "pandas*"
+          - "scikit-learn*"
+      document-processing:
+        patterns:
+          - "PyPDF2*"
+          - "python-docx*"
+          - "Pillow*"
+          - "pytesseract*"
+
+  # Docker dependencies
+  - package-ecosystem: "docker"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    commit-message:
+      prefix: "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    commit-message:
+      prefix: "docker"
+
+  # GitHub Actions dependencies
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    commit-message:
+      prefix: "github-actions"

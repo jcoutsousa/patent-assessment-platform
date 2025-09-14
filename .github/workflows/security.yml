@@ -1,0 +1,233 @@
+name: Security & Dependency Updates
+
+on:
+  schedule:
+    # Run daily at 6 AM UTC
+    - cron: '0 6 * * *'
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  # Dependency vulnerability scanning
+  dependency-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    # Frontend dependency scanning
+    - name: Frontend - Install dependencies
+      working-directory: ./frontend
+      run: npm ci
+
+    - name: Frontend - Audit dependencies
+      working-directory: ./frontend
+      run: |
+        npm audit --audit-level high --output json > frontend-audit.json || true
+        npm audit --audit-level high
+
+    # Backend dependency scanning
+    - name: Backend - Install dependencies
+      working-directory: ./backend
+      run: poetry install --no-dev
+
+    - name: Backend - Check for vulnerabilities
+      working-directory: ./backend
+      run: |
+        poetry run safety check --output json > backend-safety.json || true
+        poetry run safety check
+
+    # Upload scan results
+    - name: Upload dependency scan results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: dependency-scan-results
+        path: |
+          frontend-audit.json
+          backend-safety.json
+
+  # License compliance check
+  license-check:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install license checker
+      run: npm install -g license-checker
+
+    - name: Check frontend licenses
+      working-directory: ./frontend
+      run: |
+        npm ci
+        license-checker --onlyAllow 'MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;0BSD' --production
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install pip-licenses
+      run: pip install pip-licenses
+
+    - name: Check backend licenses
+      working-directory: ./backend
+      run: |
+        pip install -r requirements.txt
+        pip-licenses --allow-only 'MIT License;Apache Software License;BSD License;ISC License;Python Software Foundation License'
+
+  # SAST (Static Application Security Testing)
+  sast-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run CodeQL Analysis
+      uses: github/codeql-action/init@v2
+      with:
+        languages: javascript, python
+        queries: security-extended
+
+    - name: Autobuild
+      uses: github/codeql-action/autobuild@v2
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+
+    - name: Run Bandit (Python security scanner)
+      run: |
+        pip install bandit
+        bandit -r backend/ -f json -o bandit-results.json || true
+        bandit -r backend/
+
+    - name: Upload SAST results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: sast-results
+        path: bandit-results.json
+
+  # Secret scanning
+  secret-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Run TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+
+  # Container security scanning
+  container-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build frontend image for scanning
+      run: docker build -t patent-frontend:scan ./frontend
+
+    - name: Build backend image for scanning
+      run: docker build -t patent-backend:scan ./backend
+
+    - name: Run Trivy scanner on frontend
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'patent-frontend:scan'
+        format: 'sarif'
+        output: 'trivy-frontend.sarif'
+
+    - name: Run Trivy scanner on backend
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'patent-backend:scan'
+        format: 'sarif'
+        output: 'trivy-backend.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-frontend.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-backend.sarif'
+
+  # Create security report
+  security-report:
+    runs-on: ubuntu-latest
+    needs: [dependency-scan, sast-scan, container-scan]
+    if: always()
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download scan results
+      uses: actions/download-artifact@v4
+      with:
+        pattern: '*-results'
+        merge-multiple: true
+
+    - name: Generate security report
+      run: |
+        echo "# Security Scan Report - $(date)" > security-report.md
+        echo "" >> security-report.md
+        echo "## Summary" >> security-report.md
+        echo "- Dependency Scan: ${{ needs.dependency-scan.result }}" >> security-report.md
+        echo "- SAST Scan: ${{ needs.sast-scan.result }}" >> security-report.md
+        echo "- Container Scan: ${{ needs.container-scan.result }}" >> security-report.md
+        echo "" >> security-report.md
+        echo "## Details" >> security-report.md
+        echo "Full scan results are available in the workflow artifacts." >> security-report.md
+
+    - name: Upload security report
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-report
+        path: security-report.md
+
+    - name: Comment on PR if applicable
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('security-report.md', 'utf8');
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: report
+          });

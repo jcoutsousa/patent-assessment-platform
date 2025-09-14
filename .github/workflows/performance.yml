@@ -1,0 +1,371 @@
+name: Performance Monitoring
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    # Run performance tests weekly on Sunday at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+
+jobs:
+  # Lighthouse performance audit
+  lighthouse-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install dependencies
+      working-directory: ./frontend
+      run: npm ci
+
+    - name: Build application
+      working-directory: ./frontend
+      run: npm run build
+      env:
+        NEXT_PUBLIC_API_URL: 'http://localhost:8000'
+
+    - name: Install Lighthouse CI
+      run: npm install -g @lhci/cli@0.12.x
+
+    - name: Create Lighthouse CI config
+      run: |
+        cat > lighthouserc.json << EOF
+        {
+          "ci": {
+            "collect": {
+              "numberOfRuns": 3,
+              "startServerCommand": "cd frontend && npm start",
+              "startServerReadyPattern": "Ready",
+              "startServerReadyTimeout": 30000,
+              "url": [
+                "http://localhost:3000/",
+                "http://localhost:3000/assessment"
+              ]
+            },
+            "assert": {
+              "assertions": {
+                "categories:performance": ["error", {"minScore": 0.8}],
+                "categories:accessibility": ["error", {"minScore": 0.9}],
+                "categories:best-practices": ["error", {"minScore": 0.9}],
+                "categories:seo": ["error", {"minScore": 0.8}]
+              }
+            },
+            "upload": {
+              "target": "filesystem",
+              "outputDir": "./lighthouse-reports"
+            }
+          }
+        }
+        EOF
+
+    - name: Run Lighthouse CI
+      run: lhci autorun
+
+    - name: Upload Lighthouse reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: lighthouse-reports
+        path: lighthouse-reports/
+
+    - name: Generate performance summary
+      if: always()
+      run: |
+        echo "# Performance Audit Summary" > performance-summary.md
+        echo "" >> performance-summary.md
+        echo "## Lighthouse Scores" >> performance-summary.md
+        echo "Generated on: $(date)" >> performance-summary.md
+        echo "" >> performance-summary.md
+        echo "See detailed reports in the artifacts." >> performance-summary.md
+
+    - name: Upload performance summary
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: performance-summary
+        path: performance-summary.md
+
+  # Backend performance tests
+  backend-performance:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: patent_assessment_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Install dependencies
+      run: poetry install
+
+    - name: Install load testing tools
+      run: poetry add --group dev locust pytest-benchmark
+
+    - name: Create performance test
+      run: |
+        cat > performance_test.py << 'EOF'
+        import time
+        import asyncio
+        from fastapi.testclient import TestClient
+        from main import app
+        import pytest
+
+        client = TestClient(app)
+
+        def test_health_endpoint_performance():
+            """Test health endpoint response time"""
+            start_time = time.time()
+            response = client.get("/health")
+            end_time = time.time()
+
+            assert response.status_code == 200
+            assert (end_time - start_time) < 0.1  # Should respond within 100ms
+
+        @pytest.mark.benchmark(group="upload")
+        def test_upload_performance(benchmark):
+            """Benchmark file upload endpoint"""
+            with open("test_document.txt", "w") as f:
+                f.write("This is a test document for performance testing.")
+
+            def upload_file():
+                with open("test_document.txt", "rb") as f:
+                    files = {"file": ("test.txt", f, "text/plain")}
+                    return client.post("/api/upload", files=files)
+
+            result = benchmark(upload_file)
+            assert result.status_code == 200
+
+        def test_concurrent_requests():
+            """Test handling multiple concurrent requests"""
+            import concurrent.futures
+
+            def make_request():
+                return client.get("/health")
+
+            start_time = time.time()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(make_request) for _ in range(50)]
+                responses = [future.result() for future in futures]
+            end_time = time.time()
+
+            # All requests should succeed
+            assert all(r.status_code == 200 for r in responses)
+            # Should handle 50 requests within 5 seconds
+            assert (end_time - start_time) < 5.0
+        EOF
+
+    - name: Run performance tests
+      run: |
+        poetry run pytest performance_test.py -v --benchmark-json=benchmark.json
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/patent_assessment_test
+        REDIS_URL: redis://localhost:6379/0
+        TEST_MODE: true
+
+    - name: Generate performance report
+      if: always()
+      run: |
+        echo "# Backend Performance Test Results" > backend-performance.md
+        echo "" >> backend-performance.md
+        echo "Generated on: $(date)" >> backend-performance.md
+        echo "" >> backend-performance.md
+        if [ -f benchmark.json ]; then
+          echo "## Benchmark Results" >> backend-performance.md
+          echo "See benchmark.json for detailed results." >> backend-performance.md
+        fi
+
+    - name: Upload performance artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: backend-performance
+        path: |
+          benchmark.json
+          backend-performance.md
+
+  # Database performance monitoring
+  database-performance:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: patent_assessment
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install database tools
+      run: |
+        pip install psycopg2-binary sqlalchemy alembic
+
+    - name: Run database migrations
+      working-directory: ./backend
+      run: |
+        export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/patent_assessment
+        alembic upgrade head
+
+    - name: Test database performance
+      run: |
+        cat > db_performance.py << 'EOF'
+        import time
+        import psycopg2
+        from sqlalchemy import create_engine, text
+        import statistics
+
+        DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/patent_assessment"
+        engine = create_engine(DATABASE_URL)
+
+        def test_connection_performance():
+            """Test database connection time"""
+            times = []
+            for _ in range(10):
+                start = time.time()
+                conn = engine.connect()
+                conn.close()
+                end = time.time()
+                times.append(end - start)
+
+            avg_time = statistics.mean(times)
+            print(f"Average connection time: {avg_time:.4f}s")
+            assert avg_time < 0.1, f"Connection too slow: {avg_time:.4f}s"
+
+        def test_query_performance():
+            """Test basic query performance"""
+            with engine.connect() as conn:
+                start = time.time()
+                result = conn.execute(text("SELECT 1"))
+                list(result)
+                end = time.time()
+
+                query_time = end - start
+                print(f"Basic query time: {query_time:.4f}s")
+                assert query_time < 0.01, f"Query too slow: {query_time:.4f}s"
+
+        if __name__ == "__main__":
+            test_connection_performance()
+            test_query_performance()
+            print("Database performance tests passed!")
+        EOF
+
+        python db_performance.py
+
+  # Create comprehensive performance report
+  performance-report:
+    runs-on: ubuntu-latest
+    needs: [lighthouse-audit, backend-performance, database-performance]
+    if: always()
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        merge-multiple: true
+
+    - name: Generate comprehensive report
+      run: |
+        echo "# Performance Monitoring Report" > comprehensive-performance-report.md
+        echo "" >> comprehensive-performance-report.md
+        echo "**Generated on:** $(date)" >> comprehensive-performance-report.md
+        echo "" >> comprehensive-performance-report.md
+        echo "## Test Results Summary" >> comprehensive-performance-report.md
+        echo "- Frontend (Lighthouse): ${{ needs.lighthouse-audit.result }}" >> comprehensive-performance-report.md
+        echo "- Backend API: ${{ needs.backend-performance.result }}" >> comprehensive-performance-report.md
+        echo "- Database: ${{ needs.database-performance.result }}" >> comprehensive-performance-report.md
+        echo "" >> comprehensive-performance-report.md
+        echo "## Recommendations" >> comprehensive-performance-report.md
+
+        if [ "${{ needs.lighthouse-audit.result }}" != "success" ]; then
+          echo "- ⚠️  Review frontend performance optimizations" >> comprehensive-performance-report.md
+        fi
+
+        if [ "${{ needs.backend-performance.result }}" != "success" ]; then
+          echo "- ⚠️  Investigate backend API performance bottlenecks" >> comprehensive-performance-report.md
+        fi
+
+        if [ "${{ needs.database-performance.result }}" != "success" ]; then
+          echo "- ⚠️  Optimize database queries and indexing" >> comprehensive-performance-report.md
+        fi
+
+        if [[ "${{ needs.lighthouse-audit.result }}" == "success" && "${{ needs.backend-performance.result }}" == "success" && "${{ needs.database-performance.result }}" == "success" ]]; then
+          echo "- ✅ All performance tests passed - system performing well" >> comprehensive-performance-report.md
+        fi
+
+        echo "" >> comprehensive-performance-report.md
+        echo "## Detailed Reports" >> comprehensive-performance-report.md
+        echo "See individual artifacts for detailed performance metrics." >> comprehensive-performance-report.md
+
+    - name: Upload comprehensive report
+      uses: actions/upload-artifact@v4
+      with:
+        name: comprehensive-performance-report
+        path: comprehensive-performance-report.md
+
+    - name: Comment on commit if performance degraded
+      if: ${{ needs.lighthouse-audit.result == 'failure' || needs.backend-performance.result == 'failure' }}
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('comprehensive-performance-report.md', 'utf8');
+
+          // Get the latest commit SHA
+          const commit = context.sha;
+
+          // Create a commit comment
+          await github.rest.repos.createCommitComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            commit_sha: commit,
+            body: `## ⚠️ Performance Test Results\n\n${report}`
+          });

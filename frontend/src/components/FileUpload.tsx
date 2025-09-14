@@ -18,7 +18,11 @@ interface UploadedFile {
   error?: string;
 }
 
-export default function FileUpload() {
+interface FileUploadProps {
+  onUploadComplete?: (documentId: string) => void;
+}
+
+export default function FileUpload({ onUploadComplete }: FileUploadProps = {}) {
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isUploading, setIsUploading] = useState(false);
 
@@ -82,7 +86,7 @@ export default function FileUpload() {
           throw new Error(`Upload failed: ${response.statusText}`);
         }
 
-        await response.json(); // Process response if needed
+        const data = await response.json();
 
         // Update status to success
         setFiles(prev => prev.map(f =>
@@ -90,6 +94,11 @@ export default function FileUpload() {
             ? { ...f, status: 'success' as const, progress: 100 }
             : f
         ));
+
+        // Call the callback if provided
+        if (onUploadComplete && data.document_id) {
+          onUploadComplete(data.document_id);
+        }
       } catch (error) {
         // Update status to error
         setFiles(prev => prev.map(f =>

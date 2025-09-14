@@ -1,0 +1,43 @@
+name: Dependabot Auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: ${{ github.actor == 'dependabot[bot]' }}
+
+    steps:
+    - name: Dependabot metadata
+      id: metadata
+      uses: dependabot/fetch-metadata@v1.6.0
+      with:
+        github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+    - name: Auto-approve dependency updates
+      if: ${{ steps.metadata.outputs.update-type != 'version-update:semver-major' }}
+      run: gh pr review --approve "$PR_URL"
+      env:
+        PR_URL: ${{ github.event.pull_request.html_url }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Auto-merge minor and patch updates
+      if: ${{ steps.metadata.outputs.update-type != 'version-update:semver-major' }}
+      run: gh pr merge --auto --merge "$PR_URL"
+      env:
+        PR_URL: ${{ github.event.pull_request.html_url }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Comment on major updates
+      if: ${{ steps.metadata.outputs.update-type == 'version-update:semver-major' }}
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: '🚨 **Major Version Update Detected** 🚨\n\nThis PR contains major version updates that require manual review:\n- **Package**: ${{ steps.metadata.outputs.dependency-names }}\n- **Update Type**: ${{ steps.metadata.outputs.update-type }}\n\nPlease review the breaking changes and test thoroughly before merging.'
+          })
